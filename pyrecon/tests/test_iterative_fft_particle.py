@@ -169,7 +169,6 @@ def test_eboss(data_fn, randoms_fn):
         # recon_ref.summary()
         boxsize = recon_ref.binsize * recon_ref.nbins
         boxcenter = np.array([getattr(recon_ref, '{}min'.format(x)) for x in 'xyz']) + boxsize / 2.
-
         print('')
         print('#' * 50)
         print('')

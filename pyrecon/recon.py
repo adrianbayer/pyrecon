@@ -8,7 +8,7 @@ import numpy as np
 from pmesh.pm import ParticleMesh
 
 from .mesh import _get_mesh_attrs, _get_resampler, _wrap_positions
-from .utils import BaseClass
+from .utils import BaseClass, cartesian_to_sky
 from . import utils, mpi
 
 
@@ -281,8 +281,6 @@ class BaseReconstruction(BaseClass):
         self.wrap = bool(wrap)
         self.rdtype = _get_real_dtype(dtype)
         self.dtype = np.dtype(dtype) if self._compressed else 'c{:d}'.format(2 * self.rdtype.itemsize)
-        self.f = f
-        self.bias = bias
         positions = _format_positions(positions, position_type=self.position_type, dtype=self.rdtype, copy=True, mpicomm=self.mpicomm, mpiroot=self.mpiroot)
         data_positions = _format_positions(data_positions, position_type=self.position_type, dtype=self.rdtype, copy=True, mpicomm=self.mpicomm, mpiroot=self.mpiroot)
         randoms_positions = _format_positions(randoms_positions, position_type=self.position_type, dtype=self.rdtype, copy=True, mpicomm=self.mpicomm, mpiroot=self.mpiroot)
@@ -294,6 +292,17 @@ class BaseReconstruction(BaseClass):
         self.set_los(los)
         if self.mpicomm.rank == 0:
             self.log_info('Using mesh with nmesh={}, boxsize={}, boxcenter={}.'.format(self.nmesh, self.boxsize, self.boxcenter))
+        self.f = f
+        self.bias = bias
+        if callable(f):
+            if type(self).__name__ != 'IterativeFFTReconstruction':
+                raise ValueError('Redshift-evolving growth only available for IterativeFFTReconstruction')
+            self.growth_at_dist = f
+            self.f = self.set_growth_mesh(f)
+        if callable(bias):
+            if type(self).__name__ != 'IterativeFFTReconstruction':
+                raise ValueError('Redshift-evolving bias only available for IterativeFFTReconstruction')
+            self.bias = self.set_bias_mesh(bias)
         if data_positions is not None:
             data_weights = _format_weights(data_weights, size=len(data_positions), copy=True, mpicomm=self.mpicomm, mpiroot=self.mpiroot)
             self.assign_data(data_positions, data_weights, position_type='pos', copy=False, mpiroot=None)
@@ -336,6 +345,66 @@ class BaseReconstruction(BaseClass):
             raise ValueError('Provide f')
         if self.bias is None:
             raise ValueError('Provide bias')
+
+    def _lattice_positions(self):
+        boxcenter = self.boxcenter
+        boxsize = self.boxsize
+        cellsize = self.boxsize / self.nmesh
+        xedges = np.arange(boxcenter[0] - boxsize[0]/2, boxcenter[0] + boxsize[0]/2 + cellsize[0], cellsize[0])
+        yedges = np.arange(boxcenter[1] - boxsize[1]/2, boxcenter[1] + boxsize[1]/2 + cellsize[1], cellsize[1])
+        zedges = np.arange(boxcenter[2] - boxsize[2]/2, boxcenter[2] + boxsize[2]/2 + cellsize[2], cellsize[2])
+        xcentres = 1/2 * (xedges[:-1] + xedges[1:])
+        ycentres = 1/2 * (yedges[:-1] + yedges[1:])
+        zcentres = 1/2 * (zedges[:-1] + zedges[1:])
+        lattice_x, lattice_y, lattice_z = np.meshgrid(xcentres, ycentres, zcentres, indexing='ij')
+        lattice_x = lattice_x.flatten()
+        lattice_y = lattice_y.flatten()
+        lattice_z = lattice_z.flatten()
+        return np.c_[lattice_x, lattice_y, lattice_z]
+
+    def set_growth_mesh(self, growth_at_dist):
+        if self.mpicomm.rank == 0:
+            self.log_info('Setting mesh of growth rate values.')
+            lattice_positions = self._lattice_positions()
+            lattice_weights = growth_at_dist(utils.distance(lattice_positions))
+        else:
+            lattice_positions = None
+            lattice_weights = None
+        lattice_positions = _format_positions(lattice_positions, position_type='pos', dtype=self.rdtype, copy=True, mpicomm=self.mpicomm, mpiroot=0)
+        lattice_weights = _format_weights(lattice_weights, size=len(lattice_positions), copy=True, mpicomm=self.mpicomm, mpiroot=0)
+        mesh_growth = self.pm.create('real', value=0)
+        self._paint(lattice_positions, weights=lattice_weights, out=mesh_growth)
+        return mesh_growth
+
+    def set_bias_mesh(self, bias_at_dist):
+        if self.mpicomm.rank == 0:
+            self.log_info('Setting mesh of bias values.')
+            lattice_positions = self._lattice_positions()
+            lattice_weights = bias_at_dist(utils.distance(lattice_positions))
+        else:
+            lattice_positions = None
+            lattice_weights = None
+        lattice_positions = _format_positions(lattice_positions, position_type='pos', dtype=self.rdtype, copy=True, mpicomm=self.mpicomm, mpiroot=0)
+        lattice_weights = _format_weights(lattice_weights, size=len(lattice_positions), copy=True, mpicomm=self.mpicomm, mpiroot=0)
+        mesh_bias = self.pm.create('real', value=0)
+        self._paint(lattice_positions, weights=lattice_weights, out=mesh_bias)
+        return mesh_bias
+        
+    def set_optimal_weights(self, n_at_dist, P0, factor=1):
+        if self.mpicomm.rank == 0:
+            self.log_info('Setting optimal weights.')
+            lattice_positions = self._lattice_positions()
+            n = n_at_dist(utils.distance(lattice_positions))
+            lattice_weights = factor * n * P0 / (1 + n * P0)
+        else:
+            lattice_positions = None
+            lattice_weights = None
+        lattice_positions = _format_positions(lattice_positions, position_type='pos', dtype=self.rdtype, copy=True, mpicomm=self.mpicomm, mpiroot=0)
+        lattice_weights = _format_weights(lattice_weights, size=len(lattice_positions), copy=True, mpicomm=self.mpicomm, mpiroot=0)
+        mesh_weights = self.pm.create('real', value=0)
+        self._paint(lattice_positions, weights=lattice_weights, out=mesh_weights)
+        self.mesh_delta *= mesh_weights
+        return
 
     def set_los(self, los=None):
         """
@@ -525,10 +594,15 @@ class BaseReconstruction(BaseClass):
 
             threshold = ran_min * sum_randoms / self._size_randoms
 
-            for delta, randoms in zip(self.mesh_delta.slabs, self.mesh_randoms.slabs):
-                mask = randoms > threshold
-                delta[mask] /= (self.bias * alpha * randoms[mask])
-                delta[~mask] = 0.
+            if type(self.bias) == float:
+                for delta, randoms in zip(self.mesh_delta.slabs, self.mesh_randoms.slabs):
+                    mask = randoms > threshold
+                    delta[mask] /= (self.bias * alpha * randoms[mask])
+            else:
+                for delta, randoms, bias in zip(self.mesh_delta.slabs, self.mesh_randoms.slabs, self.bias.slabs):
+                    mask = randoms > threshold
+                    delta[mask] /= (bias[mask] * alpha * randoms[mask])
+            delta[~mask] = 0.
 
             if check:
                 mean_nran_per_cell = self.mpicomm.allreduce(sum(randoms[randoms > 0] for randoms in self.mesh_randoms))
@@ -599,10 +673,16 @@ class BaseReconstruction(BaseClass):
             los = utils.safe_divide(positions, utils.distance(positions)[:, None])
         else:
             los = self.los.astype(shifts.dtype)
-        rsd = self.f * np.sum(shifts * los, axis=-1)[:, None] * los
+        if np.isscalar(self.f):
+            f = self.f
+        else:
+            dist = utils.distance(positions)
+            f = self.growth_at_dist(dist)
+            f = np.c_[f, f, f]
+        rsd = f * (np.sum(shifts * los, axis=-1)[:, None] * los)
         if field == 'rsd':
             return rsd
-        # field == 'disp+rsd'
+        field == 'disp+rsd'
         shifts += rsd
         return shifts
 

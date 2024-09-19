@@ -10,6 +10,8 @@ class IterativeFFTReconstruction(BaseReconstruction):
     field-level (as opposed to :class:`IterativeFFTParticleReconstruction`) algorithm.
     """
     _compressed = True
+    _f_z = True
+    _bias_z = True
 
     def run(self, niterations=3):
         """

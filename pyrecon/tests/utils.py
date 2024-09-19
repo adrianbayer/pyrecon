@@ -77,14 +77,14 @@ def save_lognormal_catalogs(data_fn, randoms_fn, seed=42):
     randoms.write(randoms_fn)
 
 
-def test_mpi(algorithm):
+def test_mpi(algorithm, with_local_los=True):
     from pyrecon.utils import cartesian_to_sky
     from pyrecon import mpi
     data, randoms = get_random_catalog(seed=42), get_random_catalog(seed=81)
     gathered_data, gathered_randoms = data.gather(mpiroot=0), randoms.gather(mpiroot=0)
     mpicomm = data.mpicomm
 
-    def get_shifts(data, randoms, position_type='pos', weight_type=True, mpicomm=None, mpiroot=None, mode='std'):
+    def get_shifts(data, randoms, position_type='pos', weight_type=True, mpicomm=None, mpiroot=None, mode='std', los='x'):
         data_positions, data_weights = data['Position'], data['Weight']
         randoms_positions, randoms_weights = randoms['Position'], randoms['Weight']
         if mpiroot is not None:
@@ -103,7 +103,7 @@ def test_mpi(algorithm):
             data_weights = randoms_weights = None
 
         if mode == 'std':
-            recon = algorithm(positions=data_positions, randoms_positions=randoms_positions, nmesh=64, position_type=position_type, los='x', dtype='f8', mpicomm=mpicomm, mpiroot=mpiroot)
+            recon = algorithm(positions=data_positions, randoms_positions=randoms_positions, nmesh=64, position_type=position_type, los=los, dtype='f8', mpicomm=mpicomm, mpiroot=mpiroot)
             assert recon.f is None
             recon.set_cosmo(f=0.8, bias=2.)
             recon.assign_data(data_positions, data_weights)
@@ -113,7 +113,7 @@ def test_mpi(algorithm):
         else:
             recon = algorithm(f=0.8, bias=2., data_positions=data_positions, data_weights=data_weights,
                               randoms_positions=randoms_positions, randoms_weights=randoms_weights,
-                              nmesh=64, position_type=position_type, los='x', dtype='f8', mpicomm=mpicomm, mpiroot=mpiroot)
+                              nmesh=64, position_type=position_type, los=los, dtype='f8', mpicomm=mpicomm, mpiroot=mpiroot)
         shifted_positions = recon.read_shifted_positions(data_positions, field='disp+rsd')
         if mpiroot is None or mpicomm.rank == mpiroot:
             assert np.array(shifted_positions).shape == np.array(data_positions).shape
@@ -124,13 +124,14 @@ def test_mpi(algorithm):
             shifts_ref = get_shifts(gathered_data, gathered_randoms, position_type='pos', weight_type=weight_type, mpicomm=gathered_data.mpicomm)
 
         for mpiroot in [None, 0]:
-            for mode in ['std', 'fast']:
-                for position_type in ['pos', 'rdd', 'xyz']:
-                    shifts = get_shifts(data, randoms, position_type=position_type, weight_type=weight_type, mpicomm=mpicomm, mpiroot=mpiroot, mode=mode)
-                    if mpiroot is None:
-                        shifts = mpi.gather(shifts, mpicomm=mpicomm, mpiroot=0)
-                    if mpicomm.rank == 0:
-                        assert np.allclose(shifts, shifts_ref, rtol=1e-6)
+            for los in ['x'] + (['local'] if with_local_los else []):
+                for mode in ['std', 'fast']:
+                    for position_type in ['pos', 'rdd', 'xyz']:
+                        shifts = get_shifts(data, randoms, position_type=position_type, weight_type=weight_type, mpicomm=mpicomm, mpiroot=mpiroot, mode=mode)
+                        if mpiroot is None:
+                            shifts = mpi.gather(shifts, mpicomm=mpicomm, mpiroot=0)
+                        if mpicomm.rank == 0:
+                            assert np.allclose(shifts, shifts_ref, rtol=1e-6)
 
 
 def main():

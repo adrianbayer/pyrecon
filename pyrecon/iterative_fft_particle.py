@@ -33,7 +33,7 @@ class OriginalIterativeFFTParticleReconstruction(BaseReconstruction):
             self._weights_data = np.concatenate([self._weights_data, weights], axis=0)
         self._paint(positions, weights=weights, out=self.mesh_data)
 
-    def set_density_contrast(self, ran_min=0.01, smoothing_radius=15., check=False):
+    def set_density_contrast(self, ran_min=0.01, smoothing_radius=15., check=False, kw_weights=None):
         r"""
         Set :math:`\delta` field :attr:`mesh_delta` from data and randoms fields :attr:`mesh_data` and :attr:`mesh_randoms`.
 
@@ -90,6 +90,8 @@ class OriginalIterativeFFTParticleReconstruction(BaseReconstruction):
                         self.log_warning('Masking a large fraction {:.4f} of non-empty cells. You should probably increase the number of randoms.'.format(frac_nonzero_masked))
                     else:
                         self.log_info('Masking a fraction {:.4f} of non-empty cells.'.format(frac_nonzero_masked))
+            if kw_weights:
+                self._set_optimal_weights(**{'alpha': alpha, **kw_weights})
 
         else:
             self.mesh_delta /= (self.mesh_delta.cmean() * self.bias)

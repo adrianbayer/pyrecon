@@ -5,6 +5,12 @@ from pyrecon.utils import MemoryMonitor
 
 
 def test_mesh():
+    nmesh = 4
+    pm = ParticleMesh(BoxSize=[1. * nmesh] * 3, Nmesh=[nmesh] * 3, dtype='f8')
+    field = pm.create('real', value=0)
+    field = pm.paint(0.1 * np.array([1.] * 3)[None, :], resampler='cic', hold=True, out=field)
+    print(field.value)
+
     with MemoryMonitor() as mem:
         nmesh = [256] * 3
         pm = ParticleMesh(BoxSize=[1.] * 3, Nmesh=nmesh)
